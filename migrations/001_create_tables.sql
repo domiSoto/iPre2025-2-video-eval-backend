@@ -109,7 +109,4 @@ CREATE INDEX IF NOT EXISTS idx_transcripts_video_start ON transcript_segments(vi
 CREATE INDEX IF NOT EXISTS idx_evals_video ON evaluations(video_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_video ON video_chunks(video_id);
 
--- Full-text search index for transcript segments (optional). Adjust language as needed.
--- CREATE INDEX IF NOT EXISTS idx_transcripts_text_fts ON transcript_segments USING GIN (to_tsvector('spanish', text));
-
 -- End of migration

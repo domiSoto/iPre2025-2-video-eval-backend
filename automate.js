@@ -2,7 +2,7 @@
 // Uso: node automate.js "/ruta/al/audio.mp3" (o video) "/ruta/a/presentacion.pdf"
 // Ejecuta split_file.js, transcribe_chunks.js y evaluate_file.js en orden
 
-import { execSync, spawnSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 

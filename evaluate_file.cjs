@@ -1,6 +1,6 @@
 // evaluate_file.cjs
-// Uso: node evaluate_file.cjs <carpeta_transcripciones> <archivo_presentacion>
-// node evaluate_file.cjs ./transcripts ./presentacion.pdf
+// Uso: node evaluate_file.cjs <carpeta_transcripciones> <archivo_presentacion> [jobId]
+// node evaluate_file.cjs ./transcripts ./presentacion.pdf 12
 
 const fetch = (...args) => import('node-fetch').then(mod => mod.default(...args));
 const dotenv = require("dotenv");
@@ -16,10 +16,7 @@ const modelo = "google/gemini-2.5-pro";
 // Carpeta de transcripciones
 const transcripcionesDir = process.argv[2] || "./transcripts";
 const presentacionPath = process.argv[3];
-// opcional: job id pasado desde el pipeline para asociar la evaluación
 const jobId = process.argv[4] || null;
-
-// uso: node evaluate_file.cjs <carpeta_transcripciones> <archivo_presentacion> [jobId]
 
 // Extrae el texto visual de la presentación usando extract_presentation_text.cjs
 function leerPresentacion(presentacionPath) {
@@ -49,82 +46,142 @@ function leerTranscripciones(dir) {
   return textoCompleto;
 }
 
-// Prompt base (rúbrica fija para pruebas)
-const promptBase = `Quiero que actúes como un evaluador académico especializado en presentaciones de proyectos de software. A continuación, te entregaré una rúbrica detallada y luego la transcripción de una presentación oral.
+function buildJsonInstructionFromRubric(rubric) {
+  const scoresObj = rubric.criteria
+    .map(c => `"${c.key || c.title.replace(/\s+/g, "_").toLowerCase()}": <1-7>`)
+    .join(", ");
 
-RÚBRICA:
-Claridad y Coherencia de la Presentación (25%)
+  const commentsObj = rubric.criteria
+    .map(c => `"${c.key || c.title.replace(/\s+/g, "_").toLowerCase()}": "<comentario>"`)
+    .join(", ");
 
-La exposición tiene una estructura lógica y clara.
-El presentador explica adecuadamente el flujo de la plataforma (dashboard, módulos, transiciones).
-Se entiende el propósito de cada funcionalidad mostrada.
+  return `
+IMPORTANTE: Devuelve SOLO un único objeto JSON válido sin explicaciones ni texto adicional.
 
-Avances Técnicos Implementados (25%)
+El JSON debe tener la forma:
 
-Se presentan funcionalidades efectivamente nuevas (interacción con móvil, filtros, ingreso de datos financieros).
-Se evidencia una mejora respecto al ciclo anterior.
-La funcionalidad es demostrada correctamente durante la presentación.
+{
+  "scores": { ${scoresObj} },
+  "total_score": <number>,
+  "comments": { ${commentsObj} },
+  "summary": "<resumen final>"
+}
 
-Valor para los Usuarios (20%)
-
-Se explica el beneficio que cada nuevo módulo entrega a perfiles específicos (administrador, técnico, finanzas).
-Se justifica cómo los cambios resuelven problemas reales (consistencia de datos, control de recaudación, monitoreo de fallas).
-
-Calidad de la Demostración (15%)
-
-La demo muestra un flujo fluido y sin errores técnicos evidentes.
-Se interactúa correctamente con las vistas clave (dashboard, órdenes, máquinas, finanzas).
-Las interacciones web/móvil se entienden y funcionan.
-
-Presentación Oral y Manejo del Discurso (15%)
-
-El presentador se expresa con claridad, confianza y ritmo adecuado.
-Uso de un lenguaje comprensible para una audiencia técnica y no técnica.
-Se mantiene el interés durante toda la presentación.
-
-Por favor, evalúa la transcripción usando esta rúbrica. Para cada criterio, indica:
-Una puntuación de 1 a 7 (donde 7 es excelente y 1 deficiente)
-Un breve comentario justificando la nota
+Calcula "total_score" como el promedio ponderado usando los pesos reales de la rúbrica.
 `;
+}
 
-// IMPORTANT: When asking the AI to evaluate for storage in the DB we need
-// a strict JSON output matching the `evaluations` table. We request a
-// JSON object with per-criterion scores and per-criterion comments, plus
-// an overall summary. We'll store `scores` in the `scores` JSONB column
-// and serialize the comments+summary into the `notes` TEXT column.
-// Required JSON schema:
-// {
-//   "scores": {
-//     "clarity_coherence": <1-7>,
-//     "technical_advances": <1-7>,
-//     "user_value": <1-7>,
-//     "demo_quality": <1-7>,
-//     "oral_presentation": <1-7>
-//   },
-//   "total_score": <number>,
-//   "comments": {
-//     "clarity_coherence": "<comment>",
-//     "technical_advances": "<comment>",
-//     "user_value": "<comment>",
-//     "demo_quality": "<comment>",
-//     "oral_presentation": "<comment>"
-//   },
-//   "summary": "<short final summary>"
-// }
-// The script will parse this JSON and save `scores` and `total_score` into
-// the DB; `comments` + `summary` will be stored in `notes` as a JSON string.
-const promptJsonInstruction = `\n\nIMPORTANTE: Devuelve SOLO un único objeto JSON válido sin explicaciones ni texto adicional. El JSON debe tener la forma:\n{\n  "scores": { "clarity_coherence": <1-7>, "technical_advances": <1-7>, "user_value": <1-7>, "demo_quality": <1-7>, "oral_presentation": <1-7> },\n  "total_score": <number>,\n  "comments": { "clarity_coherence": "<comentario>", "technical_advances": "<comentario>", "user_value": "<comentario>", "demo_quality": "<comentario>", "oral_presentation": "<comentario>" },\n  "summary": "<resumen final>"\n}\nCalcula \"total_score\" como el promedio ponderado usando los pesos: 25,25,20,15,15 (mantén la escala 1-7).`; 
+// RÚBRICA DINÁMICA DESDE BD (fallback)
+const DEFAULT_RUBRIC = {
+  id: null,
+  title: 'Rúbrica por defecto',
+  criteria: [
+    { key: 'clarity_coherence', title: 'Claridad y Coherencia de la Presentación', weight: 25, description: 'La exposición tiene una estructura lógica y clara. El presentador explica adecuadamente el flujo de la plataforma.' },
+    { key: 'technical_advances', title: 'Avances Técnicos Implementados', weight: 25, description: 'Se presentan funcionalidades efectivamente nuevas y se evidencia una mejora respecto al ciclo anterior.' },
+    { key: 'user_value', title: 'Valor para los Usuarios', weight: 20, description: 'Se explica el beneficio que cada nuevo módulo entrega a perfiles específicos y cómo resuelven problemas reales.' },
+    { key: 'demo_quality', title: 'Calidad de la Demostración', weight: 15, description: 'La demo muestra un flujo fluido y sin errores técnicos evidentes.' },
+    { key: 'oral_presentation', title: 'Presentación Oral y Manejo del Discurso', weight: 15, description: 'El presentador se expresa con claridad, confianza y ritmo adecuado.' }
+  ]
+};
 
+// Construye un prompt humano legible a partir de un objeto rubric { id, title, criteria: [{key,title,weight,description}] }
+function buildPromptFromRubric(rubric) {
+  const header = `Quiero que actúes como un evaluador académico especializado en presentaciones de proyectos de software. A continuación, te entregaré una rúbrica detallada y luego la transcripción de una presentación oral.\n\nRÚBRICA: ${rubric.title}\n`;
+  const criteriaText = rubric.criteria.map(c => {
+    return `\n${c.title} (${c.weight}%):\n${c.description}\n`;
+  }).join('\n');
+
+  const scoringGuide = `\nPor favor, evalúa cada criterio con una puntuación de 1 a 7 (1 deficiente, 7 excelente). Para cada criterio entrega además un breve comentario justificando la nota.\n`;
+  return header + criteriaText + scoringGuide;
+}
+
+// Obtiene la rúbrica que corresponde al jobId (busca workspace en metadata o en la tabla videos)
+// Devuelve objeto { rubric, rubricId, workspaceId } donde rubric es DEFAULT_RUBRIC si no se encontró nada.
+async function fetchRubricForJob(jobId) {
+  // Intentamos leer metadata local primero
+  let workspaceId = null;
+  try {
+    if (jobId) {
+      const jobsMetaPath = path.join(process.cwd(), 'jobs', jobId, 'metadata.json');
+      if (fs.existsSync(jobsMetaPath)) {
+        const metadata = JSON.parse(fs.readFileSync(jobsMetaPath, 'utf-8'));
+        if (metadata && metadata.workspaceId) workspaceId = metadata.workspaceId;
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  // Import dinámico del helper DB
+  let db = null;
+  try {
+    const dbModule = await import('./lib/db.js');
+    db = dbModule.default;
+    await db.init();
+  } catch (e) {
+    // si falla DB, devolvemos fallback
+    console.warn('DB no disponible para obtener rúbrica:', e && e.message ? e.message : e);
+    return { rubric: DEFAULT_RUBRIC, rubricId: null, workspaceId: workspaceId || null };
+  }
+
+  // Si no obtuvimos workspaceId del metadata, intentamos por video: workspace
+  try {
+    if (!workspaceId && jobId) {
+      const v = await db.getVideoByJobExternalId(jobId);
+      if (v && v.workspace_id) workspaceId = v.workspace_id;
+      if (v.rubric_id) {
+        const rb = await db.getRubricById(v.rubric_id);
+        if (rb) {
+          console.log("Rúbrica encontrada por rubric_id:", rb);
+          return { rubric: rb, rubricId: rb.id, workspaceId };
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("Error buscando video:", e.message);
+  }
+
+  // Si todavía no hay workspaceId, devolvemos fallback
+  if (!workspaceId) {
+    console.log("No workspaceId found for jobId", jobId);
+    return { rubric: DEFAULT_RUBRIC, rubricId: null, workspaceId: null };
+  }
+
+  // Intentamos traer la rúbrica activa asociada a ese workspace
+  try {
+    // Se asume que en lib/db.js existe una función como getActiveRubricByWorkspace(workspaceId)
+    // que devuelve { id, title, criteria: [ { key, title, weight, description }, ... ] }
+    const stored = await db.getActiveRubricByWorkspace(workspaceId);
+    console.log("=== RUBRIC FROM DB ===");
+    console.dir(stored, { depth: 10 });
+    if (stored && stored.criteria && Array.isArray(stored.criteria) && stored.criteria.length > 0) {
+      return { rubric: stored, rubricId: stored.id || null, workspaceId };
+    } else {
+      return { rubric: DEFAULT_RUBRIC, rubricId: null, workspaceId };
+    }
+  } catch (e) {
+    console.warn('Error obteniendo rúbrica desde BD:', e && e.message ? e.message : e);
+    return { rubric: DEFAULT_RUBRIC, rubricId: null, workspaceId };
+  }
+}
+
+// Función principal de evaluación
 async function evaluarTranscripcion() {
   const transcripcion = leerTranscripciones(transcripcionesDir);
   const textoPresentacion = leerPresentacion(presentacionPath);
-  let prompt = promptBase;
+
+  // Trae la rúbrica (o fallback)
+  const { rubric, rubricId, workspaceId } = await fetchRubricForJob(jobId);
+  console.log("=== RUBRIC SENT TO GEMINI ===");
+  console.dir(rubric, { depth: 10 });
+
+  // Construye el prompt a partir de la rúbrica
+  let prompt = buildPromptFromRubric(rubric);
   if (textoPresentacion) {
     prompt += `\n\nCONTENIDO VISUAL DE LA PRESENTACIÓN EXTRAÍDO (diapositivas, PDF o PPT):\n${textoPresentacion}`;
   }
   prompt += `\n\nTRANSCRIPCIÓN ORAL:\n${transcripcion}`;
-  // append JSON instruction so the model returns structured output we can store
-  prompt += promptJsonInstruction;
+  prompt += buildJsonInstructionFromRubric(rubric);
 
   console.log("Enviando transcripción y contenido visual a Gemini...\n");
 
@@ -148,7 +205,7 @@ async function evaluarTranscripcion() {
     const evaluationText = data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : JSON.stringify(data);
     console.log(evaluationText);
 
-    // If we have a jobId try to save evaluation into DB (best-effort)
+    // Si tenemos jobId intentamos guardar evaluación en BD (now including rubricId)
     if (jobId) {
       try {
         const jobsMetaPath = path.join(process.cwd(), 'jobs', jobId, 'metadata.json');
@@ -180,12 +237,11 @@ async function evaluarTranscripcion() {
         }
 
         if (videoId) {
-          // try to parse the AI response as JSON (it should follow the schema requested)
+          // parse JSON
           let parsed = null;
           try {
             parsed = JSON.parse(evaluationText);
           } catch (e) {
-            // attempt to extract JSON object from text if the model wrapped it in backticks or markdown
             const first = evaluationText.indexOf('{');
             const last = evaluationText.lastIndexOf('}');
             if (first !== -1 && last !== -1 && last > first) {
@@ -195,27 +251,32 @@ async function evaluarTranscripcion() {
 
           const scores = parsed && parsed.scores ? parsed.scores : {};
           const totalScore = parsed && (parsed.total_score || parsed.totalScore) ? (parsed.total_score || parsed.totalScore) : null;
-
-          // Build notes to store: we prefer structured comments + summary
-          let notesToStore = null;
           const comments = parsed && parsed.comments ? parsed.comments : (parsed && parsed.notes && typeof parsed.notes === 'object' ? parsed.notes : null);
           const summary = parsed && parsed.summary ? parsed.summary : (parsed && parsed.notes && typeof parsed.notes === 'string' ? parsed.notes : null);
+
+          // Build notes payload
+          let notesToStore = null;
           if (comments || summary) {
-            // store as an OBJECT with keys `comments` and `summary` so it is inserted as JSONB
             const payload = { comments: comments || {}, summary: summary || '' };
             notesToStore = payload;
           } else if (parsed && parsed.notes && typeof parsed.notes === 'object') {
             notesToStore = parsed.notes;
           } else if (parsed && parsed.notes && typeof parsed.notes === 'string') {
-            // wrap raw string into object so DB column (JSONB NOT NULL) always receives JSON
             notesToStore = { raw: parsed.notes };
           } else {
-            // fallback: wrap raw evaluation text
             notesToStore = { raw: evaluationText };
           }
 
           try {
-            await db.insertEvaluation({ videoId, evaluatorId: null, rubricId: null, scores: scores, totalScore: totalScore, notes: notesToStore });
+            // insertEvaluation now includes rubricId if available
+            await db.insertEvaluation({
+              videoId,
+              evaluatorId: null,
+              rubricId: rubricId || null,
+              scores: scores,
+              totalScore: totalScore,
+              notes: notesToStore
+            });
             console.log('Evaluación guardada en la base de datos para videoId=', videoId);
           } catch (e) {
             console.error('Error guardando evaluación en DB:', e.message);
@@ -232,4 +293,10 @@ async function evaluarTranscripcion() {
   }
 }
 
-evaluarTranscripcion();
+// Ejecutar la función si este script se invoca directamente
+if (require.main === module) {
+  evaluarTranscripcion().catch(err => {
+    console.error('Error en evaluación:', err);
+    process.exit(1);
+  });
+}

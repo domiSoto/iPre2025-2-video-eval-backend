@@ -1,13 +1,11 @@
 import express from 'express';
-import path from 'path';
-import fs from 'fs';
 import db from '../lib/db.js';
 
 const router = express.Router();
 
 export default function createDashboardRoutes({ upload, jobsDir }) {
-    //Para un workspaceID dado, obtener, cantidad de evaluaciones completadas, puntuacion promedio general y puntucion promedio por criterio de la rubrica
-    // Ademas, devolver distribucion de puntaje total y distribucion de puntaje por criterio
+    // Para un workspaceID dado, obtener, cantidad de evaluaciones completadas, puntuacion promedio general y puntución promedio por criterio de la rubrica
+    // Ademas, devolver distribución de puntaje total y distribución de puntaje por criterio
     // Tambien devolver las ultimas 5 evealuaciones realizadas (titulo del video, nota total, fecha de creacion)
     router.get('/workspaces/:workspaceId/dashboard', async (req, res) => {
         const { workspaceId } = req.params;

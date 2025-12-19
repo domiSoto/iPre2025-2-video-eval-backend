@@ -11,7 +11,7 @@ export default function createEvaluateRoutes({ upload, jobsDir }) {
     const { videoJobId } = req.params;
     const host = `${req.protocol}://${req.get('host')}`;
 
-    // Try DB first
+    // Primero intentar obtener la evaluacion desde la base de datos
     try {
       await db.init();
       const video = await db.getVideoByJobExternalId(videoJobId);
@@ -40,7 +40,7 @@ export default function createEvaluateRoutes({ upload, jobsDir }) {
       // continue to filesystem fallback
     }
 
-    // Fallback: try to read jobs/<jobId>/metadata.json for any evaluation notes
+    // Fallback: Intentar leer metadata.json desde el filesystem
     try {
       const metaPath = path.join(jobsDir || path.resolve(process.cwd(), 'jobs'), videoJobId, 'metadata.json');
       if (!fs.existsSync(metaPath)) return res.status(404).json({ error: 'evaluation not found' });
@@ -64,11 +64,12 @@ export default function createEvaluateRoutes({ upload, jobsDir }) {
     }
   });
 
-  // Allow updating an evaluation (any updatable field). Body may include `id` (evaluation id) or leave it out to update latest.
+  // Permitir actualizar una evaluación (cualquier campo actualizable). 
+  // El cuerpo puede incluir `id` (id de la evaluación) o dejarlo fuera para actualizar la más reciente.
   router.patch('/video/:videoJobId/evaluation', async (req, res) => {
     const { videoJobId } = req.params;
     const payload = req.body || {};
-    // normalize incoming keys to DB column names
+    // Mapear campos del payload a columnas de la base de datos
     const mapPayload = {};
     if (payload.evaluatorId !== undefined) mapPayload.evaluator_id = payload.evaluatorId;
     if (payload.rubricId !== undefined) mapPayload.rubric_id = payload.rubricId;
@@ -81,14 +82,14 @@ export default function createEvaluateRoutes({ upload, jobsDir }) {
       await db.init();
       const video = await db.getVideoByJobExternalId(videoJobId);
       if (!video) {
-        // filesystem fallback: try to update metadata.json
+        // Fallback: actualizar metadata.json en filesystem
         const metaPath = path.join(jobsDir || path.resolve(process.cwd(), 'jobs'), videoJobId, 'metadata.json');
         if (!fs.existsSync(metaPath)) return res.status(404).json({ error: 'video not found' });
         const raw = fs.readFileSync(metaPath, 'utf8');
         const meta = JSON.parse(raw);
-        // support `evaluations` array or single `evaluation` object
+        // Evaluar si hay evaluaciones en metadata
         if (Array.isArray(meta.evaluations) && meta.evaluations.length > 0) {
-          let idx = meta.evaluations.length - 1; // default to last
+          let idx = meta.evaluations.length - 1; // Ultima evaluación por defecto
           if (payload.id) {
             const found = meta.evaluations.findIndex(e => (e.id && e.id === payload.id) || (e.id && String(e.id) === String(payload.id)));
             if (found !== -1) idx = found;
@@ -104,7 +105,7 @@ export default function createEvaluateRoutes({ upload, jobsDir }) {
         return res.status(404).json({ error: 'no evaluation found in metadata' });
       }
 
-      // choose evaluation id: provided id or latest for video
+      // Elegir id de evaluación: id proporcionado o la más reciente para el video
       let evalId = payload.id || null;
       if (!evalId) {
         const r = await db.query('SELECT id FROM evaluations WHERE video_id = $1 ORDER BY created_at DESC LIMIT 1', [video.id]);
@@ -112,8 +113,9 @@ export default function createEvaluateRoutes({ upload, jobsDir }) {
         evalId = r.rows[0].id;
       }
 
+      // Validar que haya campos para actualizar
       if (Object.keys(mapPayload).length === 0) return res.status(400).json({ error: 'no updatable fields provided' });
-
+      // Realizar la actualización
       const updated = await db.updateEvaluation(evalId, mapPayload);
       if (!updated) return res.status(404).json({ error: 'evaluation not found' });
       return res.json({ ok: true, evaluation: updated });

@@ -1,7 +1,7 @@
 // split_file.js
 // Uso: node split_file.js <ruta_video|audio> <output_folder>
 // Requiere tener FFmpeg instalado en el sistema
-// node split_file.js "/mnt/c/Users/Dominique/Downloads/audio_presentacion_5min.mp3" ./chunks
+// Uso local: node split_file.js "/mnt/c/Users/Dominique/Downloads/audio_presentacion_5min.mp3" ./chunks
 
 import { execSync } from 'child_process';
 import fs from 'fs';

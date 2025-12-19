@@ -7,6 +7,7 @@ import db from '../lib/db.js';
 export default function createUploadRoutes({ upload, jobsDir }) {
   const router = express.Router();
 
+  // Endpoint para subir archivos y comenzar el proceso automatizado
   router.post('/automate', upload.fields([{ name: 'audio', maxCount: 1 }, { name: 'presentation', maxCount: 1 }]), (req, res) => {
     const files = req.files || {};
     const { workspaceId } = req.body || {};
@@ -23,6 +24,7 @@ export default function createUploadRoutes({ upload, jobsDir }) {
     const jobDir = path.join(jobsDir, jobId);
     fs.mkdirSync(jobDir, { recursive: true });
 
+    // Mover archivos subidos a la carpeta del job
     const destAudio = path.join(jobDir, audioFile.filename);
     const destPresentation = path.join(jobDir, presentationFile.filename);
     try {
@@ -35,6 +37,7 @@ export default function createUploadRoutes({ upload, jobsDir }) {
       fs.unlinkSync(presentationFile.path);
     }
 
+    // Crear metadata inicial
     const metadata = {
       jobId,
       audio: path.relative(process.cwd(), destAudio),
@@ -46,7 +49,7 @@ export default function createUploadRoutes({ upload, jobsDir }) {
     const metadataPath = path.join(jobDir, 'metadata.json');
     fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
 
-    // Insert a row in Postgres videos table (best-effort). If DB is not configured this will fail softly.
+    // Insertar una fila en la tabla videos de Postgres (mejor esfuerzo).
     (async () => {
       try {
         await db.init();
@@ -62,7 +65,7 @@ export default function createUploadRoutes({ upload, jobsDir }) {
           durationSeconds: null,
           metadata
         });
-        // write back db id to metadata for reference
+        // escribir de nuevo el id de la base de datos en los metadatos para referencia
         try {
           const m = JSON.parse(fs.readFileSync(metadataPath, 'utf-8'));
           m.dbId = created.id;
@@ -74,6 +77,7 @@ export default function createUploadRoutes({ upload, jobsDir }) {
       }
     })();
 
+    // Generar miniatura en segundo plano
     (function generateThumbnailBackground(mediaPath, thumbPath, metaPath) {
       const args = ['-y', '-ss', '00:00:01', '-i', mediaPath, '-frames:v', '1', '-q:v', '2', '-vf', 'scale=320:-1', thumbPath];
       const p = spawn('ffmpeg', args, { stdio: 'ignore' });
@@ -99,7 +103,8 @@ export default function createUploadRoutes({ upload, jobsDir }) {
         } catch (e) {}
       });
     })(destAudio, path.join(jobDir, 'thumbnail.jpg'), metadataPath);
-
+    
+    // Iniciar el proceso automatizado
     const automatePath = path.resolve(process.cwd(), 'automate.js');
     const stream = req.query.stream === 'true';
     if (stream) {
@@ -115,7 +120,7 @@ export default function createUploadRoutes({ upload, jobsDir }) {
     metadata.totalChunks = null;
     metadata.transcribedChunks = 0;
     fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
-
+    // Ejecutar automate.js
     const child = spawn(process.execPath, [automatePath, destAudio, destPresentation, jobId], {
       cwd: process.cwd(),
       env: process.env,
@@ -123,7 +128,7 @@ export default function createUploadRoutes({ upload, jobsDir }) {
 
     let stdout = '';
     let stderr = '';
-
+    // Monitorear salida para actualizar progreso en metadata.json
     child.stdout.on('data', (chunk) => {
       const text = chunk.toString();
       stdout += text;
@@ -134,8 +139,10 @@ export default function createUploadRoutes({ upload, jobsDir }) {
       }
       try {
         const meta = JSON.parse(fs.readFileSync(metadataPath, 'utf-8'));
+        // Inicializa estructura para evitar duplicados
+        if (!Array.isArray(meta.transcribedChunkNames)) meta.transcribedChunkNames = [];
         if (/Archivo dividido exitosamente/i.test(text)) {
-          const chunksPath = path.resolve(process.cwd(), 'chunks');
+          const chunksPath = path.join(jobDir, 'chunks');
           if (fs.existsSync(chunksPath)) {
             const files = fs.readdirSync(chunksPath).filter(f => /chunk_\d+\.(mp4|mp3|m4a)$/i.test(f));
             meta.totalChunks = files.length;
@@ -145,14 +152,26 @@ export default function createUploadRoutes({ upload, jobsDir }) {
         }
         const m = text.match(/Transcripci[o\u00f3]n completada para (chunk_\d+\.(mp4|mp3|m4a))/i);
         if (m) {
-          meta.transcribedChunks = (meta.transcribedChunks || 0) + 1;
+          const chunkName = m[1];
+
+          // dedupe: solo contar si NO estaba
+          if (!meta.transcribedChunkNames.includes(chunkName)) {
+            meta.transcribedChunkNames.push(chunkName);
+            meta.transcribedChunks = meta.transcribedChunkNames.length;
+          } else {
+            // ya contado, no hacer nada sobre el contador
+          }
+
           if (meta.totalChunks) {
+            // mantén tu reparto de pesos (si lo deseas)
             const transcribeProgress = 88 * (meta.transcribedChunks / meta.totalChunks);
             meta.progress = Math.round(2 + transcribeProgress);
           } else {
+            // fallback si no hay totalChunks detectado
             meta.progress = Math.min((meta.transcribedChunks || 1) * 10 + 10, 90);
           }
-          meta.progressMessage = `transcribed ${meta.transcribedChunks}/${meta.totalChunks || '?'} chunks`;
+
+          meta.progressMessage = `transcribed ${meta.transcribedChunks}/${meta.totalChunks || '?' } chunks`;
         }
         if (/Evaluando transcripciones|Evaluando transcripciones y presentaci\u00f3n|3\. Evaluando/i.test(text)) {
           meta.progress = Math.max(meta.progress || 0, 92);
@@ -162,6 +181,7 @@ export default function createUploadRoutes({ upload, jobsDir }) {
       } catch (e) {}
     });
 
+    // Monitorear stderr (salida de error)
     child.stderr.on('data', (chunk) => {
       const text = chunk.toString();
       stderr += text;
@@ -172,6 +192,7 @@ export default function createUploadRoutes({ upload, jobsDir }) {
       }
     });
 
+    // Manejar cierre del proceso
     child.on('close', (code) => {
       metadata.status = code === 0 ? 'done' : 'failed';
       metadata.finishedAt = new Date().toISOString();
@@ -182,6 +203,7 @@ export default function createUploadRoutes({ upload, jobsDir }) {
       metadata.progressMessage = code === 0 ? 'finished' : (metadata.progressMessage || 'failed');
       fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
 
+      // Devolver resultado final
       const result = { jobId, code, stdout, stderr };
       if (stream) {
         res.write(`event: done\ndata: ${JSON.stringify(result)}\n\n`);
@@ -195,6 +217,7 @@ export default function createUploadRoutes({ upload, jobsDir }) {
       }
     });
 
+    // Manejar errores del proceso
     child.on('error', (err) => {
       metadata.status = 'error';
       metadata.finishedAt = new Date().toISOString();
